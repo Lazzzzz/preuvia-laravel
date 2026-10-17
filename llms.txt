@@ -1,0 +1,347 @@
+# laz/preuvia-laravel
+
+> Laravel SDK for the Preuvia REST API v1 (proof dossiers, documents, Datasure timestamp certifications, eIDAS certificates, signed PDFs, users, tokens) and receiver for Preuvia's signed callbacks. PHP 8.2+, Laravel 11/12/13. Namespace `Preuvia\Laravel`. Installed from Git with a Composer `vcs` repository, not Packagist.
+
+This file is the condensed reference of the package. It lists every public entry point with its exact signature, the rules the SDK applies (retries, uploads, signatures), and the test helpers. `README.md` has the same content in French with more prose. The field-level API reference lives on the Preuvia instance: `/developpeurs` and `/developpeurs/openapi.json`.
+
+## Install
+
+```json
+"repositories": [{ "type": "vcs", "url": "https://github.com/Lazzzzz/preuvia-laravel" }]
+```
+
+```bash
+composer require laz/preuvia-laravel
+```
+
+The service provider and the `Preuvia` facade alias are auto-discovered.
+
+## Configuration
+
+`config/preuvia.php`, publish with `php artisan vendor:publish --tag=preuvia-config`.
+
+| Key | Env | Default |
+| --- | --- | --- |
+| `base_url` | `PREUVIA_API_BASE_URL` | `https://preuvia.eliteinspection.fr/api/v1` |
+| `api_key` | `PREUVIA_API_KEY` | none (required) |
+| `health_token` | `PREUVIA_HEALTH_TOKEN` | none |
+| `timeout` | `PREUVIA_API_TIMEOUT` | 30 |
+| `connect_timeout` | `PREUVIA_API_CONNECT_TIMEOUT` | 10 |
+| `retry.times` | `PREUVIA_API_RETRY_TIMES` | 2 |
+| `retry.sleep_ms` | `PREUVIA_API_RETRY_SLEEP_MS` | 500, multiplied by the attempt number |
+| `retry.max_retry_after` | `PREUVIA_API_MAX_RETRY_AFTER` | 10 (seconds) |
+| `documents.send_hash` | `PREUVIA_DOCUMENTS_SEND_HASH` | true |
+| `webhooks.secret` | `PREUVIA_WEBHOOK_SECRET` | none |
+| `webhooks.tolerance` | `PREUVIA_WEBHOOK_TOLERANCE` | 300 (seconds) |
+| `webhooks.path` | `PREUVIA_WEBHOOK_PATH` | null (built-in receiver disabled) |
+| `webhooks.middleware` | none | `[]` (extra middleware for the built-in route) |
+
+The API key is sent as `Authorization: Bearer {key}`. A missing key or base URL throws `ConfigurationException` before any HTTP request.
+
+## Client
+
+Resolve `Preuvia\Laravel\Preuvia` from the container (singleton, alias `preuvia`) or use the facade `Preuvia\Laravel\Facades\Preuvia`.
+
+Every `with*()` method returns a modified copy. The shared client is never mutated.
+
+```php
+Preuvia::withApiKey(string $apiKey): static      // per-tenant key
+Preuvia::withBaseUrl(string $baseUrl): static
+Preuvia::withTimeout(int $seconds): static
+Preuvia::withRetries(int $times): static
+Preuvia::withoutRetries(): static
+Preuvia::baseUrl(): string
+
+Preuvia::health(): PreuviaResponse               // GET /health, never throws on a 200 or 503 JSON answer
+Preuvia::me(): PreuviaResponse                   // GET /me, API key context
+Preuvia::get(string $endpoint, array $query = []): PreuviaResponse
+Preuvia::post(string $endpoint, array $payload = []): PreuviaResponse
+Preuvia::patch(string $endpoint, array $payload = []): PreuviaResponse
+Preuvia::delete(string $endpoint, array $payload = []): PreuviaResponse
+```
+
+`get/post/patch/delete` take an endpoint relative to `base_url` (e.g. `'dossiers'`). Use them only for an endpoint the resources below do not cover.
+
+## Resources
+
+All methods return `PreuviaResponse`, except `lazy*()` (a `LazyCollection` of item arrays) and `download*()` (a `Download`). Every `{uuid}` path segment is URL-encoded by the SDK. `*` marks a required field.
+
+### templates(): built-in templates
+- `list(array $query = []): PreuviaResponse`, `GET /templates`. Query: `per_page`, `page`.
+- `lazy(array $query = []): LazyCollection`
+
+### customTemplates()
+- `list(array $query = [])`, `GET /templates/custom`. Query: `per_page`, `page`, `include_archived`, `status`, `search`.
+- `lazy(array $query = [])`
+- `create(array $payload)`, `POST /templates/custom`. Body: `name*`, `description`, `category*`, `icon`, `image`, `tone`, `config*`.
+- `show(string $uuid)`
+- `update(string $uuid, array $payload)`, `PATCH`. Same fields as create, all optional.
+- `publish(string $uuid)`, `archive(string $uuid)`, `unarchive(string $uuid)`
+- `duplicate(string $uuid, array $payload = [])`
+
+### dossiers()
+- `list(array $query = [])`, `GET /dossiers`. Query: `per_page`, `page`, `include_archived`, `status`, `template_uuid`, `search`, `source`.
+- `lazy(array $query = [])`
+- `create(array $payload)`, `POST /dossiers`. Body: `template_uuid*`, `name`, `assigned_user_uuid`, `due_at`.
+- `show(string $uuid)`: the dossier with its template snapshot, steps, proofs and documents.
+- `update(string $uuid, array $payload)`, `PATCH`. Body: `name`, `due_at`.
+- `delete(string $uuid)`
+- `assign(string $uuid, string $userUuid)`, `POST /dossiers/{uuid}/assignee` with `{user_uuid}`.
+- `unassign(string $uuid)`, `DELETE /dossiers/{uuid}/assignee`.
+- `complete(string $uuid)`, `reopen(string $uuid)`, `archive(string $uuid)`, `unarchive(string $uuid)`
+- `syncTemplate(string $uuid)`, `POST /dossiers/{uuid}/template-sync`. Applies the template's newer version. The response meta tells what was added.
+
+### documents(): proof documents of a dossier
+- `list(string $dossierUuid, array $query = [])`. Query: `per_page`, `page`.
+- `lazy(string $dossierUuid, array $query = [])`
+- `upload(string $dossierUuid, mixed $file, int $stepIndex, int $proofIndex, array $options = [])`, multipart `POST /dossiers/{uuid}/documents`. See "Uploads".
+- `show(string $dossierUuid, string $documentUuid)`
+- `download(string $dossierUuid, string $documentUuid, bool $preview = false): Download`
+- `artifacts(string $dossierUuid, string $documentUuid)`: certification, eIDAS certificate and signed PDF statuses.
+- `certify(string $dossierUuid, string $documentUuid)`: queues a Datasure certification, `POST .../certifications`. Costs tokens.
+- `generateEidasCertificate(string $dossierUuid, string $documentUuid)`: `POST .../eidas-certificate`.
+- `downloadEidasCertificate(string $dossierUuid, string $documentUuid): Download`
+- `signPdf(string $dossierUuid, string $documentUuid)`: `POST .../sign-pdf`.
+- `downloadSignedPdf(string $dossierUuid, string $documentUuid): Download`
+
+### certifications()
+- `list(array $query = [])`. Query: `per_page`, `page`, `status`.
+- `lazy(array $query = [])`
+- `show(string $uuid)`
+
+### users(): users of the client account
+- `list(array $query = [])`. Query: `per_page`, `page`, `status`, `search`.
+- `lazy(array $query = [])`
+- `create(array $payload)`. Body: `first_name*`, `last_name`, `email*`, `password`, `password_hash`, `role`, `is_owner`, `is_active`.
+- `show(string $uuid)`
+- `update(string $uuid, array $payload)`. Same fields, all optional.
+- `activate(string $uuid)`, `deactivate(string $uuid)`
+
+### tokens()
+- `balance()`, `GET /tokens/balance`.
+- `transactions(array $query = [])`. Query: `per_page`, `page`.
+- `lazyTransactions(array $query = [])`
+
+## Responses
+
+Every JSON answer is the envelope `{success, message, data, meta: {code, pagination?}, errors}`. `Preuvia\Laravel\Http\PreuviaResponse` wraps it. It is read-only `ArrayAccess` over the whole envelope (`$response['data']['uuid']`), iterable, and `JsonSerializable`.
+
+```php
+$response->data(?string $key = null, mixed $default = null): mixed   // data_get on data, dot notation
+$response->meta(?string $key = null, mixed $default = null): mixed
+$response->code(): ?string            // meta.code
+$response->errors(): array
+$response->message(): ?string
+$response->pagination(): ?Pagination  // currentPage, lastPage, perPage, total; hasMorePages()
+$response->hasMorePages(): bool
+$response->status(): int              // HTTP status
+$response->successful(): bool
+$response->header(string $header): string
+$response->response(): Illuminate\Http\Client\Response
+$response->toArray(): array           // raw envelope
+```
+
+`lazy()` requests pages of 100 items and yields each item of `data` until the last page.
+
+`Preuvia\Laravel\Http\Download` (binary answers):
+
+```php
+$download->body(): string
+$download->mimeType(): ?string
+$download->filename(): ?string         // from Content-Disposition (filename* supported), reduced to a basename
+$download->size(): int
+$download->status(): int
+$download->save(string $path): string  // writes to a local path, creates the directory
+$download->store(string $path, ?string $disk = null): string  // writes to a filesystem disk
+$download->response(): Illuminate\Http\Client\Response
+```
+
+## Uploads
+
+`documents()->upload()` accepts a file path, an `SplFileInfo` (including `UploadedFile`) or an open stream resource. A caller's stream is never closed by the SDK.
+
+`$options`:
+- `filename`: name sent for the file. Defaults to the file's name.
+- `captured_at`: `DateTimeInterface` or string, sent as ISO 8601.
+- `client_capture_id`: client-side unique id of the capture. Re-sending the same id returns the already stored document instead of creating a duplicate. A different file under the same id gives 409 `capture_id_conflict`.
+- `client_sha256`: computed automatically when `documents.send_hash` is true. Preuvia rejects a file altered in transit with 422 `capture_hash_mismatch`. Pass a string to provide it, or `false` to skip it for this call.
+- `device`: array with `id`, `name`, `model`, `platform`, `os_version`, `app_version`.
+- Any other key is sent as is.
+
+## Errors
+
+Every failure throws a subclass of `Preuvia\Laravel\Exceptions\PreuviaException`:
+
+| Exception | When |
+| --- | --- |
+| `ConfigurationException` | missing API key or base URL, no request sent |
+| `ConnectionException` | network, DNS or timeout failure |
+| `AuthenticationException` | 401 (`invalid_api_key`, `api_key_not_valid`) |
+| `InsufficientTokensException` | 402 `insufficient_tokens` |
+| `AuthorizationException` | 403 (`missing_api_scope`, `missing_permission`, `forbidden`, `step_role_forbidden`) |
+| `NotFoundException` | 404 |
+| `ConflictException` | 409 (`capture_id_conflict`, `template_snapshot_diverged`) |
+| `ValidationException` | 422 (`validation_failed`, `capture_hash_mismatch`) |
+| `RateLimitException` | 429 |
+| `ServerException` | 5xx |
+| `RequestException` | any other error status, or a 2xx envelope with `success: false` |
+| `InvalidResponseException` | a 2xx answer that is not the JSON envelope |
+| `FileException` | the file to upload cannot be read |
+
+```php
+$e->method(): ?string
+$e->endpoint(): ?string
+$e->status(): ?int
+$e->response(): ?array      // decoded envelope
+$e->errorCode(): ?string    // meta.code
+$e->errors(): array         // field errors on 422
+$e->retryAfter(): ?int      // seconds, from Retry-After
+$e->isTemporary(): bool     // connection error, 429 or 5xx: retry later, e.g. from a queued job
+```
+
+## Retries
+
+A request is retried up to `retry.times` times only when it is safe to replay: any GET, or an upload carrying `client_capture_id`. A POST, PATCH or DELETE is never replayed, so a dossier is never created twice. Retries happen after a connection error or a 429, 502, 503 or 504 answer. The SDK waits `Retry-After` when present, otherwise `retry.sleep_ms × attempt`. A `Retry-After` above `retry.max_retry_after` is not waited for: the exception is thrown at once and `$e->retryAfter()` carries the delay (use it for `$this->release()` in a job). Waits go through `Illuminate\Support\Sleep`, so `Sleep::fake()` works in tests.
+
+## Callbacks (webhooks)
+
+Preuvia sends a signed POST for each certification outcome. Headers:
+- `X-Preuvia-Signature: t={unix timestamp},sha256={hex}`: HMAC-SHA256 of `"{t}.{raw body}"` with the callback secret.
+- `X-Preuvia-Event`, `X-Preuvia-Delivery` (stable across attempts, use it to deduplicate), `X-Preuvia-Attempt`, `X-Preuvia-Sandbox`, `Idempotency-Key`.
+
+`Preuvia\Laravel\Webhooks\WebhookEvent` (string-backed enum):
+
+| Case | Value | Laravel event class |
+| --- | --- | --- |
+| `CertificationSucceeded` | `certification.success` | `Webhooks\Events\CertificationSucceeded` |
+| `CertificationFailed` | `certification.failed` | `Webhooks\Events\CertificationFailed` |
+| `CertificationInsufficientTokens` | `certification.insufficient_tokens` | `Webhooks\Events\CertificationInsufficientTokens` |
+| `EidasCertificateGenerated` | `certification.eidas_certificate.generated` | `Webhooks\Events\EidasCertificateGenerated` |
+| `EidasCertificateFailed` | `certification.eidas_certificate.failed` | `Webhooks\Events\EidasCertificateFailed` |
+| `PdfSigned` | `certification.pdf_signed` | `Webhooks\Events\PdfSigned` |
+| `PdfSignatureFailed` | `certification.pdf_signature_failed` | `Webhooks\Events\PdfSignatureFailed` |
+
+Enum helpers: `isCertification()`, `hasArtifact()`, `isSuccess()`, `isFailure()`, `artifactType(): ?string` (`eidas_certificate` or `pades_pdf`), `eventClass(): string`.
+
+### Built-in receiver
+
+Set `PREUVIA_WEBHOOK_PATH` (e.g. `webhooks/preuvia`). The package registers `POST /{path}`, named `preuvia.webhook`, outside the `web` group (no session, no CSRF), behind `VerifyPreuviaWebhook`. For each callback it dispatches `Webhooks\Events\WebhookReceived` (also for unknown events), then the specific event class. Each event has `public readonly PreuviaWebhook $webhook`.
+
+Receiver answers:
+- 200 `{"received": true}`: the callback was handled.
+- 401: missing or invalid signature, or a timestamp outside the tolerance.
+- 503: no secret configured, or a listener threw `RetryWebhookLater`. Preuvia sends the callback again.
+- 500: any other listener exception. Preuvia retries.
+
+```php
+use Preuvia\Laravel\Webhooks\Events\PdfSigned;
+use Preuvia\Laravel\Webhooks\Exceptions\RetryWebhookLater;
+
+Event::listen(function (PdfSigned $event) {
+    $webhook = $event->webhook;
+    $report = Report::firstWhere('preuvia_document_uuid', $webhook->documentUuid())
+        ?? throw new RetryWebhookLater(60);   // 503 + Retry-After: 60
+    // ...
+});
+```
+
+### Own controller
+
+Add `Preuvia\Laravel\Webhooks\Http\VerifyPreuviaWebhook` to the route (and exclude CSRF). The verified webhook is in `$request->attributes->get(PreuviaWebhook::class)`. Or verify by hand:
+
+```php
+WebhookSignature::verify(string $payload, ?string $header, string $secret, int $tolerance = 300, ?int $now = null): void  // throws InvalidSignatureException (reason())
+WebhookSignature::isValid(string $payload, ?string $header, string $secret, int $tolerance = 300, ?int $now = null): bool
+WebhookSignature::sign(string $payload, string $secret, ?int $timestamp = null): string   // header value
+PreuviaWebhook::fromRequest(Request $request): PreuviaWebhook
+```
+
+### PreuviaWebhook
+
+Serializable value object, safe to pass to queued listeners.
+
+```php
+$webhook->event(): ?WebhookEvent        // null for an event unknown to this SDK version
+$webhook->eventName(): string
+$webhook->is(WebhookEvent|string $event): bool
+$webhook->deliveryId(): ?string
+$webhook->attempt(): int
+$webhook->isSandbox(): bool
+$webhook->occurredAt(): ?CarbonImmutable
+$webhook->payload(?string $key = null, mixed $default = null): mixed   // data_get on the JSON body
+$webhook->client(): ?array
+$webhook->dossier(): ?array
+$webhook->document(): ?array
+$webhook->certification(): ?array
+$webhook->artifact(): ?array            // eIDAS certificate or signed PDF events
+$webhook->dossierUuid(): ?string
+$webhook->documentUuid(): ?string
+$webhook->certificationUuid(): ?string
+$webhook->artifactUuid(): ?string
+$webhook->clientCaptureId(): ?string    // the client_capture_id sent at upload
+$webhook->errorMessage(): ?string       // failure events
+$webhook->toArray(): array
+```
+
+## Testing
+
+```php
+use Preuvia\Laravel\Facades\Preuvia;
+use Preuvia\Laravel\Testing\PreuviaFake;
+
+Preuvia::fake([
+    'dossiers' => PreuviaFake::created(['uuid' => 'd-1']),
+    'dossiers/*/documents/*/signed-pdf' => PreuviaFake::file('%PDF-1.7', 'application/pdf', 'signed.pdf'),
+    'tokens/balance' => PreuviaFake::error('insufficient_tokens', status: 402),
+]);
+```
+
+`Preuvia::fake(array $stubs = [])` wraps `Http::fake()`. Relative keys are prefixed with `base_url`. Keys starting with `http://`, `https://` or `*` are kept as is. With no stubs, every request gets an empty successful envelope. Assert with `Http::assertSent()`.
+
+`PreuviaFake` builders, each returning a faked response:
+- `ok(mixed $data = null, ?string $message = null, array $meta = [], int $status = 200)`
+- `created(mixed $data = null, ?string $message = null)`
+- `paginated(array $items, int $page = 1, int $lastPage = 1, int $perPage = 25, ?int $total = null)`
+- `error(string $code, ?string $message = null, int $status = 400, array $errors = [], array $headers = [])`
+- `validation(array $errors)`
+- `notFound()`
+- `file(string $contents, string $mimeType = 'application/pdf', ?string $filename = null)`
+
+Signed callbacks in feature tests:
+
+```php
+use Preuvia\Laravel\Webhooks\Testing\PreuviaWebhookPayload;
+use Preuvia\Laravel\Webhooks\Testing\SignsPreuviaWebhooks;
+use Preuvia\Laravel\Webhooks\WebhookEvent;
+
+class PreuviaCallbackTest extends TestCase
+{
+    use SignsPreuviaWebhooks;
+
+    public function test_signed_pdf(): void
+    {
+        $this->postPreuviaWebhook('/webhooks/preuvia', WebhookEvent::PdfSigned,
+            PreuviaWebhookPayload::pdfSigned(['document' => ['uuid' => 'doc-1']]))
+            ->assertOk();
+    }
+}
+```
+
+- `postPreuviaWebhook(string $uri, WebhookEvent|string $event, array $payload = [], array $headers = [], ?string $secret = null)`: signs with the configured secret unless `$secret` is given. `$headers` override the generated ones.
+- `PreuviaWebhookPayload::make(WebhookEvent|string $event, array $overrides = []): array`, plus one helper per event: `certificationSucceeded`, `certificationFailed`, `certificationInsufficientTokens`, `eidasCertificateGenerated`, `eidasCertificateFailed`, `pdfSigned`, `pdfSignatureFailed`. Overrides are merged recursively.
+
+## Conventions when writing code with this SDK
+
+- Use the resource methods. Do not call `Http::` against Preuvia directly.
+- Always send `client_capture_id` with uploads from jobs or retried flows. Without it the SDK does not retry the upload, and a manual re-send can create a duplicate document.
+- Catch `InsufficientTokensException` around `certify()`, `generateEidasCertificate()` and `signPdf()`.
+- In queued jobs, use `$e->isTemporary()` and `$e->retryAfter()` to decide on `release()`.
+- Deduplicate callbacks on `deliveryId()`. Answer quickly and move heavy work to a queued listener.
+- Use `Preuvia::withApiKey()` for multi-tenant apps where each account holds its own key.
+
+## Maintaining this package
+
+- Every API v1 endpoint maps to one resource method, and is covered in `tests/Client/EndpointsTest.php` (HTTP method, path, payload).
+- Every callback event maps to a `WebhookEvent` case, an event class in `src/Webhooks/Events/` and a `PreuviaWebhookPayload` helper.
+- When the API changes, update the resource, the test, `README.md` and this file in the same change, bump `Preuvia::VERSION`, and tag a semver release (`vX.Y.Z`).
+- Checks: `vendor/bin/phpunit` and `vendor/bin/pint --test`.
