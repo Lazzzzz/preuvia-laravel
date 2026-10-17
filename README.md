@@ -75,7 +75,7 @@ $document = Preuvia::documents()->upload(
     options: [
         'client_capture_id' => 'rapport-'.$rapport->uuid, // rend l'envoi rejouable sans doublon
         'captured_at' => now(),
-        'device' => ['name' => 'Neo Elite', 'platform' => 'web'],
+        'device' => ['name' => 'Back-office', 'platform' => 'web'],
     ],
 );
 ```

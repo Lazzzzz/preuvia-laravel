@@ -72,10 +72,10 @@ class PreuviaFakeTest extends TestCase
         $client = $this->app->make(PreuviaClient::class);
         $facadeRoot = Preuvia::getFacadeRoot();
 
-        Preuvia::fake(['me' => PreuviaFake::ok(['name' => 'Neo Elite'])]);
+        Preuvia::fake(['me' => PreuviaFake::ok(['name' => 'Acme'])]);
 
-        $this->assertSame('Neo Elite', $client->me()->data('name'));
-        $this->assertSame('Neo Elite', $facadeRoot->me()->data('name'));
+        $this->assertSame('Acme', $client->me()->data('name'));
+        $this->assertSame('Acme', $facadeRoot->me()->data('name'));
         Http::assertSentCount(2);
     }
 
